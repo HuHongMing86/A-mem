@@ -100,12 +100,77 @@ class OllamaController(BaseLLMController):
             empty_response = self._generate_empty_response(response_format)
             return json.dumps(empty_response)
 
-# class SGLangController(BaseLLMController): # Original SGLangController is commented out for OpenRouter support
-# The original SGLangController is commented out.
-# We will use LiteLLMController for SGLang/OpenRouter compatibility.
-# class SGLangController(BaseLLMController):
-#     ... (Original implementation commented out)
-#     ...
+class SGLangController(BaseLLMController):
+    def __init__(self, model: str = "llama2", sglang_host: str = "http://localhost", sglang_port: int = 30000):
+        self.model = model
+        self.sglang_host = sglang_host
+        self.sglang_port = sglang_port
+        self.base_url = f"{sglang_host}:{sglang_port}"
+    
+    def _generate_empty_value(self, schema_type: str, schema_items: dict = None) -> Any:
+        if schema_type == "array":
+            return []
+        elif schema_type == "string":
+            return ""
+        elif schema_type == "object":
+            return {}
+        elif schema_type == "number" or schema_type == "integer":
+            return 0
+        elif schema_type == "boolean":
+            return False
+        return None
+
+    def _generate_empty_response(self, response_format: dict) -> dict:
+        if "json_schema" not in response_format:
+            return {}
+            
+        schema = response_format["json_schema"]["schema"]
+        result = {}
+        
+        if "properties" in schema:
+            for prop_name, prop_schema in schema["properties"].items():
+                result[prop_name] = self._generate_empty_value(prop_schema["type"], 
+                                                            prop_schema.get("items"))
+        
+        return result
+
+    def get_completion(self, prompt: str, response_format: dict, temperature: float = 0.7) -> str:
+        try:
+            # Extract JSON schema from response_format and convert to string format
+            json_schema = response_format.get("json_schema", {}).get("schema", {})
+            json_schema_str = json.dumps(json_schema)
+            
+            # Prepare SGLang request with correct format
+            payload = {
+                "text": prompt,
+                "sampling_params": {
+                    "temperature": temperature,
+                    "max_new_tokens": 1000,
+                    "json_schema": json_schema_str  # SGLang expects JSON schema as string
+                }
+            }
+            
+            # Make request to SGLang server
+            response = requests.post(
+                f"{self.base_url}/generate",
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                # SGLang returns the generated text in 'text' field
+                generated_text = result.get("text", "")
+                return generated_text
+            else:
+                print(f"SGLang server returned status {response.status_code}: {response.text}")
+                raise Exception(f"SGLang server error: {response.status_code}")
+                
+        except Exception as e:
+            print(f"SGLang completion error: {e}")
+            empty_response = self._generate_empty_response(response_format)
+            return json.dumps(empty_response)
 
 class LiteLLMController(BaseLLMController):
     """LiteLLM controller for universal LLM access including Ollama and SGLang"""
@@ -171,7 +236,7 @@ class LiteLLMController(BaseLLMController):
 class LLMController:
     """LLM-based controller for memory metadata generation"""
     def __init__(self, 
-                 backend: Literal["openai", "ollama", "sglang", "openrouter"] = "sglang",
+                 backend: Literal["openai", "ollama", "sglang"] = "sglang",
                  model: str = "gpt-4", 
                  api_key: Optional[str] = None,
                  api_base: Optional[str] = None,
@@ -187,42 +252,11 @@ class LLMController:
                 api_base="http://localhost:11434", 
                 api_key="EMPTY"
             )
-        elif backend == "openrouter":
-            # OpenRouter is an OpenAI-compatible API.
-            # It requires the base URL to be set to the OpenRouter API endpoint.
-            # The model name is passed directly.
-            self.llm = LiteLLMController(
-                model=model, 
-                api_base="https://openrouter.ai/api/v1", 
-                api_key=api_key
-            )
         elif backend == "sglang":
-            # Use LiteLLM to control SGLang or OpenRouter, which is OpenAI-compatible.
-            # OpenRouter uses the OpenAI API format but requires a custom base_url.
-            # LiteLLM handles this seamlessly.
-            # If api_base is provided, it's used (e.g., for OpenRouter or a custom SGLang server).
-            # If not, it defaults to the SGLang local server (http://localhost:30000).
-            
-            # Determine the API base URL
-            if api_base:
-                # Use the provided api_base (e.g., for OpenRouter)
-                final_api_base = api_base
-                # For OpenRouter, the model name should be passed directly
-                final_model = model
-            else:
-                # Default to local SGLang server
-                final_api_base = f"{sglang_host}:{sglang_port}/v1" # SGLang's OpenAI-compatible endpoint
-                # For SGLang, the model name should be passed as "sglang/{model}"
-                final_model = f"sglang/{model}" if not model.startswith("sglang/") else model
-                
-            # Use LiteLLMController for SGLang/OpenRouter compatibility
-            self.llm = LiteLLMController(
-                model=final_model, 
-                api_base=final_api_base, 
-                api_key=api_key
-            )
+            # Direct SGLang API calls (better performance, no proxy)
+            self.llm = SGLangController(model, sglang_host, sglang_port)
         else:
-            raise ValueError("Backend must be 'openai', 'ollama', 'sglang', or 'openrouter'")
+            raise ValueError("Backend must be 'openai', 'ollama', or 'sglang'")
 
 class MemoryNote:
     """Basic memory unit with metadata"""
